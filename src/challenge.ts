@@ -215,7 +215,15 @@ export class ChallengeDO extends DurableObject<Env> {
 
   /** Cron: re-sign the record with a fresh short `exp`, no call. */
   resign(tel: string, nowSec: number): Promise<boolean> {
-    return this.serial(() => resignBinding(this.env, tel, nowSec));
+    return this.serial(async () => {
+      try {
+        return await resignBinding(this.env, tel, nowSec);
+      } catch (err) {
+        // Nothing was saved, so the next cron run retries.
+        console.error("re-sign failed; will retry", err);
+        return false;
+      }
+    });
   }
 
   /** Test and debugging hook; never exposed over HTTP. */

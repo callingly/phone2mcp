@@ -457,6 +457,30 @@ describe("scheduled re-verification", () => {
     expect(row!.jti).toBe(after.jti);
   });
 
+  it("retries a re-sign whose KV write failed", async () => {
+    const { api_key } = await createAccount();
+    const { tel, entry } = await bindNumber({ token: api_key });
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare("UPDATE bindings SET exp = ? WHERE tel = ?").bind(now + 3600, tel).run();
+
+    const realPut = env.RECORDS.put.bind(env.RECORDS);
+    env.RECORDS.put = (async () => {
+      throw new Error("kv unavailable");
+    }) as typeof env.RECORDS.put;
+    try {
+      expect((await runScheduled(env)).resigned).toBe(0);
+    } finally {
+      env.RECORDS.put = realPut;
+    }
+    // Nothing was saved, so the record is still due and the old one still served.
+    const row = await env.DB.prepare("SELECT exp FROM bindings WHERE tel = ?").bind(tel).first<{ exp: number }>();
+    expect(row!.exp).toBe(now + 3600);
+    expect((await api("GET", `/v0/lookup/${tel}`)).body.record).toBe(entry.record);
+
+    expect((await runScheduled(env)).resigned).toBeGreaterThanOrEqual(1);
+    expect((await api("GET", `/v0/lookup/${tel}`)).body.record).not.toBe(entry.record);
+  });
+
   it("never re-signs a record past the binding's verification", async () => {
     const { api_key } = await createAccount();
     const { tel } = await bindNumber({ token: api_key });

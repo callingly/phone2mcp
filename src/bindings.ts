@@ -208,12 +208,14 @@ export async function resignBinding(env: Env, tel: string, now: number): Promise
   const { recordTtl } = config(env);
   const record = buildRecord(claim, now, Math.min(now + recordTtl, binding.verified_until));
   const jws = await signRecord(env, record);
+  // Publish before saving the new `exp`: if the KV write fails, D1 still shows
+  // the old `exp`, so the next cron run retries instead of skipping a record
+  // that was never published.
+  await publish(env, tel, jws, record.exp, binding.mcp_url_changed_at);
   const res = await env.DB.prepare("UPDATE bindings SET jti = ?, record = ?, iat = ?, exp = ?, updated_at = ? WHERE tel = ? AND jti = ?")
     .bind(record.jti, jws, record.iat, record.exp, now, tel, binding.jti)
     .run();
-  if (!res.meta.changes) return false;
-  await publish(env, tel, jws, record.exp, binding.mcp_url_changed_at);
-  return true;
+  return res.meta.changes > 0;
 }
 
 /**
