@@ -23,6 +23,8 @@ export interface ClaimRow {
   operator: string | null;
   status: string;
   failure_reason: string | null;
+  attested_at: number;
+  takeover_after: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -37,6 +39,8 @@ export interface BindingRow {
   server_key: string;
   iat: number;
   exp: number;
+  verified_at: number;
+  verified_until: number;
   next_reverify_at: number;
   reverify_failures: number;
   mcp_url_changed_at: number | null;
@@ -47,14 +51,23 @@ export interface ChallengeSubject {
   id: string;
   tel: string;
   claimId: string;
-  kind: "claim" | "reverify";
+  /**
+   * claim: first proof of a claim. reverify: periodic re-proof of a binding.
+   * takeover: the confirming second proof of a held claim (see issueBinding).
+   */
+  kind: "claim" | "reverify" | "takeover";
   createdAt: number;
   expiresAt: number;
 }
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
-/** Pick a random time in the middle of a record's life to re-challenge it. */
+/** What a successful challenge produced. */
+export type IssueResult =
+  | { status: "bound"; entry: LookupEntry }
+  | { status: "held"; takeoverAfter: number };
+
+/** Pick a random time in the middle of a verification's life to re-challenge it. */
 export function scheduleReverify(iat: number, ttl: number): number {
   const lo = 0.4 * ttl;
   const hi = 0.75 * ttl;
@@ -72,7 +85,7 @@ export async function challengeStarted(env: Env, s: ChallengeSubject): Promise<v
       "INSERT INTO challenges (id, claim_id, tel, kind, status, created_at, expires_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
     ).bind(s.id, s.claimId, s.tel, s.kind, Math.floor(s.createdAt / 1000), Math.floor(s.expiresAt / 1000)),
   ];
-  if (s.kind === "claim") {
+  if (s.kind !== "reverify") {
     stmts.push(
       env.DB.prepare(
         "UPDATE claims SET status = 'verifying', failure_reason = NULL, updated_at = ? WHERE id = ?",
@@ -82,23 +95,8 @@ export async function challengeStarted(env: Env, s: ChallengeSubject): Promise<v
   await env.DB.batch(stmts);
 }
 
-/**
- * A challenge succeeded: sign a fresh record and publish it.
- * Returns null if a re-verification raced with the binding being removed.
- */
-export async function issueBinding(env: Env, s: ChallengeSubject): Promise<LookupEntry | null> {
-  const claim = await env.DB.prepare("SELECT * FROM claims WHERE id = ?").bind(s.claimId).first<ClaimRow>();
-  if (!claim) return null;
-  const existing = await env.DB.prepare("SELECT * FROM bindings WHERE tel = ?").bind(s.tel).first<BindingRow>();
-  if (s.kind === "reverify" && existing?.claim_id !== s.claimId) return null;
-  // Write only if the binding is still what was read above (none, or the same jti).
-  const guard = existing ? "WHERE bindings.jti = ?" : "WHERE 0";
-  // The rest of the batch applies only if that write landed (D1 batches are transactions).
-  const written = "EXISTS (SELECT 1 FROM bindings WHERE tel = ? AND jti = ?)";
-
-  const { recordTtl } = config(env);
-  const now = nowSec();
-  const record: BindingRecord = {
+function buildRecord(claim: ClaimRow, now: number, exp: number): BindingRecord {
+  return {
     v: PROTOCOL_VERSION,
     tel: claim.tel,
     mcp_url: claim.mcp_url,
@@ -107,9 +105,53 @@ export async function issueBinding(env: Env, s: ChallengeSubject): Promise<Looku
     ...(claim.operator ? { operator: claim.operator } : {}),
     verified_by: ["callback"],
     iat: now,
-    exp: now + recordTtl,
+    exp,
     jti: crypto.randomUUID(),
   };
+}
+
+async function publish(env: Env, tel: string, jws: string, exp: number, urlChangedAt: number | null): Promise<LookupEntry> {
+  const value = { record: jws, ...(urlChangedAt ? { mcp_url_changed_at: urlChangedAt } : {}) };
+  await env.RECORDS.put(kvKey(tel), JSON.stringify(value), { expiration: exp });
+  return { tel, ...value };
+}
+
+/**
+ * A challenge succeeded. Usually this binds the number: a fresh verification
+ * window starts and a short-lived record is signed and published.
+ *
+ * A first proof by a different account for a number that is already bound
+ * does not switch it: the claim is held for TAKEOVER_HOLD_SECONDS and must
+ * pass a second call-back then (kind "takeover"). A brief call-forwarding
+ * hijack can't pass both, and the current binding keeps working meanwhile.
+ *
+ * Returns null if a re-verification raced with the binding being removed.
+ */
+export async function issueBinding(env: Env, s: ChallengeSubject): Promise<IssueResult | null> {
+  const claim = await env.DB.prepare("SELECT * FROM claims WHERE id = ?").bind(s.claimId).first<ClaimRow>();
+  if (!claim) return null;
+  const existing = await env.DB.prepare("SELECT * FROM bindings WHERE tel = ?").bind(s.tel).first<BindingRow>();
+  if (s.kind === "reverify" && existing?.claim_id !== s.claimId) return null;
+
+  const { recordTtl, verificationTtl, takeoverHold } = config(env);
+  const now = nowSec();
+
+  if (s.kind === "claim" && existing && existing.account_id !== claim.account_id && takeoverHold > 0) {
+    const takeoverAfter = now + takeoverHold;
+    await env.DB.batch([
+      env.DB.prepare("UPDATE claims SET status = 'held', takeover_after = ?, updated_at = ? WHERE id = ?").bind(takeoverAfter, now, claim.id),
+      env.DB.prepare("UPDATE challenges SET status = 'succeeded', resolved_at = ? WHERE id = ?").bind(now, s.id),
+    ]);
+    return { status: "held", takeoverAfter };
+  }
+
+  // Write only if the binding is still what was read above (none, or the same jti).
+  const guard = existing ? "WHERE bindings.jti = ?" : "WHERE 0";
+  // The rest of the batch applies only if that write landed (D1 batches are transactions).
+  const written = "EXISTS (SELECT 1 FROM bindings WHERE tel = ? AND jti = ?)";
+
+  const verifiedUntil = now + verificationTtl;
+  const record = buildRecord(claim, now, Math.min(now + recordTtl, verifiedUntil));
   const jws = await signRecord(env, record);
 
   const replacing = existing && existing.claim_id !== claim.id ? existing : null;
@@ -118,21 +160,22 @@ export async function issueBinding(env: Env, s: ChallengeSubject): Promise<Looku
   const stmts = [
     env.DB.prepare(
       `INSERT INTO bindings (tel, claim_id, account_id, jti, record, mcp_url, server_key, iat, exp,
-         next_reverify_at, reverify_failures, mcp_url_changed_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+         verified_at, verified_until, next_reverify_at, reverify_failures, mcp_url_changed_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
        ON CONFLICT(tel) DO UPDATE SET
          claim_id = excluded.claim_id, account_id = excluded.account_id, jti = excluded.jti,
          record = excluded.record, mcp_url = excluded.mcp_url, server_key = excluded.server_key,
-         iat = excluded.iat, exp = excluded.exp, next_reverify_at = excluded.next_reverify_at,
+         iat = excluded.iat, exp = excluded.exp, verified_at = excluded.verified_at,
+         verified_until = excluded.verified_until, next_reverify_at = excluded.next_reverify_at,
          reverify_failures = 0, mcp_url_changed_at = excluded.mcp_url_changed_at,
          updated_at = excluded.updated_at
        ${guard}`,
     ).bind(
       claim.tel, claim.id, claim.account_id, record.jti, jws, claim.mcp_url, claim.server_key,
-      record.iat, record.exp, scheduleReverify(record.iat, recordTtl), urlChangedAt, now, now,
+      record.iat, record.exp, now, verifiedUntil, scheduleReverify(now, verificationTtl), urlChangedAt, now, now,
       ...(existing ? [existing.jti] : []),
     ),
-    env.DB.prepare(`UPDATE claims SET status = 'verified', failure_reason = NULL, updated_at = ? WHERE id = ? AND ${written}`)
+    env.DB.prepare(`UPDATE claims SET status = 'verified', failure_reason = NULL, takeover_after = NULL, updated_at = ? WHERE id = ? AND ${written}`)
       .bind(now, claim.id, claim.tel, record.jti),
     env.DB.prepare(`UPDATE challenges SET status = 'succeeded', resolved_at = ? WHERE id = ? AND ${written}`)
       .bind(now, s.id, claim.tel, record.jti),
@@ -148,10 +191,29 @@ export async function issueBinding(env: Env, s: ChallengeSubject): Promise<Looku
   const [write] = await env.DB.batch(stmts);
   if (!write.meta.changes) throw new Error(`binding for ${s.tel} changed during issuance`);
 
-  const entry: LookupEntry = { tel: claim.tel, record: jws, ...(urlChangedAt ? { mcp_url_changed_at: urlChangedAt } : {}) };
-  const { tel: _tel, ...value } = entry;
-  await env.RECORDS.put(kvKey(claim.tel), JSON.stringify(value), { expiration: record.exp });
-  return entry;
+  return { status: "bound", entry: await publish(env, claim.tel, jws, record.exp, urlChangedAt) };
+}
+
+/**
+ * Re-sign a binding's record without a call: a new jti and a fresh short
+ * `exp`, never past `verified_until`. This is what keeps records short-lived,
+ * so a revoked record stops verifying within RECORD_TTL_SECONDS.
+ * Runs inside the number's ChallengeDO.
+ */
+export async function resignBinding(env: Env, tel: string, now: number): Promise<boolean> {
+  const binding = await env.DB.prepare("SELECT * FROM bindings WHERE tel = ?").bind(tel).first<BindingRow>();
+  if (!binding || binding.verified_until <= now || binding.exp >= binding.verified_until) return false;
+  const claim = await env.DB.prepare("SELECT * FROM claims WHERE id = ?").bind(binding.claim_id).first<ClaimRow>();
+  if (!claim) return false;
+  const { recordTtl } = config(env);
+  const record = buildRecord(claim, now, Math.min(now + recordTtl, binding.verified_until));
+  const jws = await signRecord(env, record);
+  const res = await env.DB.prepare("UPDATE bindings SET jti = ?, record = ?, iat = ?, exp = ?, updated_at = ? WHERE tel = ? AND jti = ?")
+    .bind(record.jti, jws, record.iat, record.exp, now, tel, binding.jti)
+    .run();
+  if (!res.meta.changes) return false;
+  await publish(env, tel, jws, record.exp, binding.mcp_url_changed_at);
+  return true;
 }
 
 /**
@@ -166,7 +228,8 @@ export async function challengeFailed(env: Env, s: ChallengeSubject, reason: str
   const markChallenge = env.DB.prepare("UPDATE challenges SET status = 'failed', failure_reason = ?, resolved_at = ? WHERE id = ?")
     .bind(reason, now, s.id);
 
-  if (s.kind === "claim") {
+  if (s.kind !== "reverify") {
+    // A failed confirming call fails the held claim; the current binding is untouched.
     await env.DB.batch([
       env.DB.prepare("UPDATE claims SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ? AND status = 'verifying'")
         .bind(reason, now, s.claimId),
@@ -182,7 +245,7 @@ export async function challengeFailed(env: Env, s: ChallengeSubject, reason: str
     const { reverifyMaxFailures, reverifyRetry } = config(env);
     const failures = binding.reverify_failures + 1;
     const nextAttempt = now + reverifyRetry;
-    if (hard || failures >= reverifyMaxFailures || nextAttempt >= binding.exp) {
+    if (hard || failures >= reverifyMaxFailures || nextAttempt >= binding.verified_until) {
       await revokeBinding(env, s.tel, `reverify_failed:${reason}`, { jti: binding.jti });
     } else {
       await env.DB.prepare("UPDATE bindings SET reverify_failures = ?, next_reverify_at = ?, updated_at = ? WHERE tel = ? AND jti = ?")
@@ -218,9 +281,9 @@ export async function revokeBinding(
   return true;
 }
 
-/** Drop a binding past its `exp`. Runs inside the number's ChallengeDO. */
+/** Drop a binding whose verification ran out. Runs inside the number's ChallengeDO. */
 export async function expireBinding(env: Env, tel: string, nowSec: number): Promise<boolean> {
-  const binding = await env.DB.prepare("SELECT claim_id, jti FROM bindings WHERE tel = ? AND exp <= ?")
+  const binding = await env.DB.prepare("SELECT claim_id, jti FROM bindings WHERE tel = ? AND verified_until <= ?")
     .bind(tel, nowSec)
     .first<Pick<BindingRow, "claim_id" | "jti">>();
   if (!binding) return false;

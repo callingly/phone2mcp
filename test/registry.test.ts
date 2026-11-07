@@ -44,12 +44,25 @@ describe("claims", () => {
     const { api_key } = await createAccount();
     const key = await serverKey();
     const bad = [
-      { tel: "6025550100", mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
-      { tel: freshTel(), mcp_url: "http://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
-      { tel: freshTel(), mcp_url: "https://a.example/mcp", server_key: "abc", registrant: "a.example" },
-      { tel: freshTel(), mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "not a domain" },
+      { tel: "6025550100", mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
+      { tel: freshTel(), mcp_url: "http://a.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
+      { tel: freshTel(), mcp_url: "https://a.example/mcp", server_key: "abc", registrant: "a.example", attest_control: true },
+      { tel: freshTel(), mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "not a domain", attest_control: true },
     ];
     for (const json of bad) expect((await api("POST", "/v0/claims", { token: api_key, json })).status).toBe(400);
+  });
+
+  it("requires the registrant to attest it controls the number", async () => {
+    const { api_key } = await createAccount();
+    const key = await serverKey();
+    const json = { tel: freshTel(), mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" };
+    const missing = await api("POST", "/v0/claims", { token: api_key, json });
+    expect(missing.status).toBe(400);
+    expect(missing.body.details.attest_control).toBeDefined();
+    expect((await api("POST", "/v0/claims", { token: api_key, json: { ...json, attest_control: false } })).status).toBe(400);
+    const ok = await api("POST", "/v0/claims", { token: api_key, json: { ...json, attest_control: true } });
+    expect(ok.status).toBe(201);
+    expect(ok.body.attested_at).toBeTypeOf("number");
   });
 
   it("hides claims from other accounts", async () => {
@@ -58,7 +71,7 @@ describe("claims", () => {
     const key = await serverKey();
     const claim = await api("POST", "/v0/claims", {
       token: a.api_key,
-      json: { tel: freshTel(), mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+      json: { tel: freshTel(), mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
     });
     expect(claim.status).toBe(201);
     expect(claim.body).toMatchObject({ status: "pending", operator: "callingly.com" });
@@ -81,7 +94,7 @@ describe("call-back verification", () => {
     const tel = freshTel();
     const claim = await api("POST", "/v0/claims", {
       token: api_key,
-      json: { tel, mcp_url: "https://mcp.acmeplumbing.com/mcp", server_key: key.publicKey, registrant: "acmeplumbing.com" },
+      json: { tel, mcp_url: "https://mcp.acmeplumbing.com/mcp", server_key: key.publicKey, registrant: "acmeplumbing.com", attest_control: true },
     });
     const verify = await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
     expect(verify.status).toBe(202);
@@ -114,7 +127,12 @@ describe("call-back verification", () => {
       operator: "callingly.com",
       verified_by: ["callback"],
     });
-    expect(record.exp - record.iat).toBe(14 * 24 * 3600);
+    // Records are short-lived; the call-back verification lasts 14 days.
+    expect(record.exp - record.iat).toBe(48 * 3600);
+    const row = await env.DB.prepare("SELECT verified_at, verified_until FROM bindings WHERE tel = ?")
+      .bind(tel)
+      .first<{ verified_at: number; verified_until: number }>();
+    expect(row!.verified_until - row!.verified_at).toBe(14 * 24 * 3600);
     expect(record.jti).toBeTruthy();
 
     // The nonce is single-use.
@@ -139,7 +157,7 @@ describe("call-back verification", () => {
     const tel = freshTel();
     const claim = await api("POST", "/v0/claims", {
       token: api_key,
-      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
     });
     await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
     const nonce = await liveNonce(tel);
@@ -156,7 +174,7 @@ describe("call-back verification", () => {
     const tel = freshTel();
     const claim = await api("POST", "/v0/claims", {
       token: api_key,
-      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
     });
     for (let i = 0; i < 3; i++) {
       expect((await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key })).status).toBe(202);
@@ -172,7 +190,7 @@ describe("call-back verification", () => {
     const tel = freshTel();
     const claim = await api("POST", "/v0/claims", {
       token: api_key,
-      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
     });
     await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
     const nonce = await liveNonce(tel);
@@ -194,7 +212,7 @@ describe("call-back verification", () => {
     const tel = freshTel();
     const claim = await api("POST", "/v0/claims", {
       token: api_key,
-      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
     });
     await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
     expect(await runDurableObjectAlarm(challengeStub(tel))).toBe(true);
@@ -242,7 +260,7 @@ describe("Telnyx webhooks", () => {
     const tel = freshTel();
     const claim = await api("POST", "/v0/claims", {
       token: api_key,
-      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
     });
     const { body } = await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
     await signedWebhook(event("call.answered", tel, body.challenge_id));
@@ -259,7 +277,7 @@ describe("Telnyx webhooks", () => {
     const tel = freshTel();
     const claim = await api("POST", "/v0/claims", {
       token: api_key,
-      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
     });
     const { body } = await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
     const answered = { data: { ...event("call.answered", tel, body.challenge_id).data, id: "evt-answer" } };
@@ -290,7 +308,7 @@ describe("Telnyx webhooks", () => {
     const tel = freshTel();
     const claim = await api("POST", "/v0/claims", {
       token: api_key,
-      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
     });
     const { body } = await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
 
@@ -327,7 +345,7 @@ describe("bindings", () => {
     expect(rev).toEqual({ reason: "registrant_deleted" });
   });
 
-  it("replaces a binding when another system proves the number, flagging the URL change", async () => {
+  it("holds a takeover by another account until a second call-back confirms it", async () => {
     const first = await createAccount();
     const second = await createAccount("othervendor.example");
     const { tel, entry: old } = await bindNumber({ token: first.api_key, mcp_url: "https://old.example/mcp" });
@@ -335,20 +353,72 @@ describe("bindings", () => {
     const key = await serverKey();
     const claim = await api("POST", "/v0/claims", {
       token: second.api_key,
-      json: { tel, mcp_url: "https://new.example/mcp", server_key: key.publicKey, registrant: "acmeplumbing.com" },
+      json: { tel, mcp_url: "https://new.example/mcp", server_key: key.publicKey, registrant: "acmeplumbing.com", attest_control: true },
     });
     expect(claim.body.warnings).toEqual(["number_already_bound_to_different_mcp_url"]);
-    const { entry } = await bindNumber({ token: second.api_key, key, tel, mcp_url: "https://new.example/mcp" });
+    await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: second.api_key });
+    let nonce = await liveNonce(tel);
+    const first_proof = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce) } });
+    expect(first_proof.status).toBe(202);
+    expect(first_proof.body).toMatchObject({ tel, status: "takeover_pending" });
+
+    // During the hold the current binding keeps working, and the claim can't be re-verified early.
+    const held = await api("GET", `/v0/claims/${claim.body.id}`, { token: second.api_key });
+    expect(held.body.status).toBe("held");
+    expect(held.body.takeover_after - Math.floor(Date.now() / 1000)).toBeGreaterThan(47 * 3600);
+    expect((await api("GET", `/v0/lookup/${tel}`)).body.record).toBe(old.record);
+    expect((await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: second.api_key })).status).toBe(409);
+    expect((await runScheduled(env)).takeovers).toBe(0);
+
+    // The hold ends: the registry calls again, and a second success switches the number.
+    await env.DB.prepare("UPDATE claims SET takeover_after = 0 WHERE id = ?").bind(claim.body.id).run();
+    expect((await runScheduled(env)).takeovers).toBe(1);
+    expect((await challengeStub(tel).inspect())?.kind).toBe("takeover");
+    nonce = await liveNonce(tel);
+    const confirmed = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce) } });
+    expect(confirmed.status).toBe(200);
 
     const looked = await api("GET", `/v0/lookup/${tel}`);
-    expect(looked.body.record).toBe(entry.record);
+    expect(looked.body.record).toBe(confirmed.body.record);
     expect(looked.body.mcp_url_changed_at).toBeTypeOf("number");
-    expect((await verifyRecord(entry.record)).operator).toBe("othervendor.example");
+    expect((await verifyRecord(confirmed.body.record)).operator).toBe("othervendor.example");
+    expect((await api("GET", `/v0/claims/${claim.body.id}`, { token: second.api_key })).body.status).toBe("verified");
 
     const { jti } = await verifyRecord(old.record);
     expect(await env.DB.prepare("SELECT reason FROM revocations WHERE jti = ?").bind(jti).first()).toEqual({ reason: "superseded" });
     // The first registrant no longer owns it.
     expect((await api("DELETE", `/v0/bindings/${tel}`, { token: first.api_key })).status).toBe(404);
+  });
+
+  it("keeps the current binding when the confirming call-back fails", async () => {
+    const first = await createAccount();
+    const second = await createAccount();
+    const { tel, entry: old } = await bindNumber({ token: first.api_key });
+
+    const key = await serverKey();
+    const claim = await api("POST", "/v0/claims", {
+      token: second.api_key,
+      json: { tel, mcp_url: "https://new.example/mcp", server_key: key.publicKey, registrant: "a.example", attest_control: true },
+    });
+    await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: second.api_key });
+    const nonce = await liveNonce(tel);
+    expect((await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce) } })).status).toBe(202);
+
+    // A brief hijack: by the confirming call the number answers elsewhere, so it times out.
+    await env.DB.prepare("UPDATE claims SET takeover_after = 0 WHERE id = ?").bind(claim.body.id).run();
+    await runScheduled(env);
+    await runDurableObjectAlarm(challengeStub(tel));
+
+    expect((await api("GET", `/v0/claims/${claim.body.id}`, { token: second.api_key })).body).toMatchObject({ status: "failed", failure_reason: "timeout" });
+    expect((await api("GET", `/v0/lookup/${tel}`)).body.record).toBe(old.record);
+  });
+
+  it("switches at once when the same account moves its own number", async () => {
+    const { api_key } = await createAccount();
+    const { tel } = await bindNumber({ token: api_key, mcp_url: "https://old.example/mcp" });
+    const { entry } = await bindNumber({ token: api_key, tel, mcp_url: "https://new.example/mcp" });
+    expect((await verifyRecord(entry.record)).mcp_url).toBe("https://new.example/mcp");
+    expect((await api("GET", `/v0/lookup/${tel}`)).body.record).toBe(entry.record);
   });
 });
 
@@ -356,14 +426,49 @@ describe("scheduled re-verification", () => {
   const makeDue = (tel: string) =>
     env.DB.prepare("UPDATE bindings SET next_reverify_at = 0 WHERE tel = ?").bind(tel).run();
 
-  it("schedules re-verification at a random point mid-life", async () => {
+  it("schedules re-verification at a random point mid-verification", async () => {
+    const { api_key } = await createAccount();
+    const { tel } = await bindNumber({ token: api_key });
+    const row = await env.DB.prepare("SELECT next_reverify_at, verified_at, verified_until FROM bindings WHERE tel = ?")
+      .bind(tel)
+      .first<{ next_reverify_at: number; verified_at: number; verified_until: number }>();
+    const ttl = row!.verified_until - row!.verified_at;
+    expect(row!.next_reverify_at).toBeGreaterThanOrEqual(row!.verified_at + 0.4 * ttl - 1);
+    expect(row!.next_reverify_at).toBeLessThanOrEqual(row!.verified_at + 0.75 * ttl);
+  });
+
+  it("re-signs records nearing expiry without a call", async () => {
     const { api_key } = await createAccount();
     const { tel, entry } = await bindNumber({ token: api_key });
-    const rec = await verifyRecord(entry.record);
-    const row = await env.DB.prepare("SELECT next_reverify_at FROM bindings WHERE tel = ?").bind(tel).first<{ next_reverify_at: number }>();
-    const ttl = rec.exp - rec.iat;
-    expect(row!.next_reverify_at).toBeGreaterThanOrEqual(rec.iat + 0.4 * ttl - 1);
-    expect(row!.next_reverify_at).toBeLessThanOrEqual(rec.iat + 0.75 * ttl);
+    const before = await verifyRecord(entry.record);
+    const now = Math.floor(Date.now() / 1000);
+    // Not yet in the refresh window: untouched.
+    expect((await runScheduled(env)).resigned).toBe(0);
+
+    await env.DB.prepare("UPDATE bindings SET exp = ? WHERE tel = ?").bind(now + 3600, tel).run();
+    expect((await runScheduled(env)).resigned).toBeGreaterThanOrEqual(1);
+    expect(await challengeStub(tel).inspect()).toBeUndefined(); // no call placed
+
+    const looked = await api("GET", `/v0/lookup/${tel}`);
+    const after = await verifyRecord(looked.body.record);
+    expect(after.jti).not.toBe(before.jti);
+    expect(after.exp - after.iat).toBe(48 * 3600);
+    const row = await env.DB.prepare("SELECT jti, verified_until FROM bindings WHERE tel = ?").bind(tel).first<{ jti: string; verified_until: number }>();
+    expect(row!.jti).toBe(after.jti);
+  });
+
+  it("never re-signs a record past the binding's verification", async () => {
+    const { api_key } = await createAccount();
+    const { tel } = await bindNumber({ token: api_key });
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare("UPDATE bindings SET exp = ?, verified_until = ?, next_reverify_at = ? WHERE tel = ?")
+      .bind(now + 600, now + 7200, now + 999999, tel)
+      .run();
+    await runScheduled(env);
+    const after = await verifyRecord((await api("GET", `/v0/lookup/${tel}`)).body.record);
+    expect(after.exp).toBe(now + 7200);
+    // Already at verified_until: nothing left to extend.
+    expect((await runScheduled(env)).resigned).toBe(0);
   });
 
   it("re-challenges due bindings and renews the record on success", async () => {
@@ -409,10 +514,10 @@ describe("scheduled re-verification", () => {
     expect((await api("GET", `/v0/lookup/${tel}`)).status).toBe(404);
   });
 
-  it("sweeps expired bindings", async () => {
+  it("sweeps bindings whose verification ran out", async () => {
     const { api_key } = await createAccount();
     const { tel, claimId } = await bindNumber({ token: api_key });
-    await env.DB.prepare("UPDATE bindings SET exp = 1 WHERE tel = ?").bind(tel).run();
+    await env.DB.prepare("UPDATE bindings SET verified_until = 1 WHERE tel = ?").bind(tel).run();
     await runScheduled(env);
     expect(await env.DB.prepare("SELECT tel FROM bindings WHERE tel = ?").bind(tel).first()).toBeNull();
     expect((await api("GET", `/v0/claims/${claimId}`, { token: api_key })).body.status).toBe("expired");

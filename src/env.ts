@@ -30,7 +30,14 @@ export interface Env {
   TELNYX_CONNECTION_ID?: string;
   TELNYX_FROM_NUMBER?: string;
   TELNYX_VOICE?: string;
+  /** Lifetime of one signed record; records are re-signed daily without a call. */
   RECORD_TTL_SECONDS?: string;
+  /** Re-sign a record once it has this little life left. */
+  RECORD_REFRESH_SECONDS?: string;
+  /** How long one successful call-back keeps a binding alive. */
+  VERIFICATION_TTL_SECONDS?: string;
+  /** How long a takeover by a different account is held before its confirming call. 0 disables the hold. */
+  TAKEOVER_HOLD_SECONDS?: string;
   CHALLENGE_TTL_SECONDS?: string;
   NONCE_DIGITS?: string;
   REVERIFY_MAX_FAILURES?: string;
@@ -47,7 +54,10 @@ export function intVar(value: string | undefined, fallback: number): number {
 }
 
 export const config = (env: Env) => ({
-  recordTtl: intVar(env.RECORD_TTL_SECONDS, 14 * 24 * 3600),
+  recordTtl: intVar(env.RECORD_TTL_SECONDS, 48 * 3600),
+  recordRefresh: intVar(env.RECORD_REFRESH_SECONDS, 24 * 3600),
+  verificationTtl: intVar(env.VERIFICATION_TTL_SECONDS, 14 * 24 * 3600),
+  takeoverHold: intVar(env.TAKEOVER_HOLD_SECONDS, 48 * 3600),
   challengeTtl: intVar(env.CHALLENGE_TTL_SECONDS, 180),
   nonceDigits: Math.min(Math.max(intVar(env.NONCE_DIGITS, 8), 6), 12),
   reverifyMaxFailures: intVar(env.REVERIFY_MAX_FAILURES, 3),

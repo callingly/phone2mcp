@@ -6,9 +6,10 @@ import {
   challengeStarted,
   expireBinding,
   issueBinding,
+  resignBinding,
   revokeBinding,
   type ChallengeSubject,
-  type LookupEntry,
+  type IssueResult,
 } from "./bindings";
 import { challengeScript, telephony, type CallState, type TelephonyEvent } from "./telephony";
 import { base64urlDecode, challengeResponseMessage } from "./protocol";
@@ -42,7 +43,7 @@ export type BeginResult =
   | { ok: false; error: "challenge_in_progress" | "call_failed" | "number_cooldown"; challengeId?: string };
 
 export type RespondResult =
-  | { ok: true; binding: LookupEntry }
+  | { ok: true; result: IssueResult }
   | { ok: false; status: 400 | 401 | 404 | 409; error: string };
 
 /**
@@ -195,10 +196,10 @@ export class ChallengeDO extends DurableObject<Env> {
       }
 
       // Issue before clearing state, so a transient failure can be retried.
-      const binding = await issueBinding(this.env, s);
+      const result = await issueBinding(this.env, s);
       await this.finish(s);
-      if (!binding) return { ok: false, status: 409, error: "binding_removed" };
-      return { ok: true, binding };
+      if (!result) return { ok: false, status: 409, error: "binding_removed" };
+      return { ok: true, result };
     });
   }
 
@@ -207,9 +208,14 @@ export class ChallengeDO extends DurableObject<Env> {
     return this.serial(() => revokeBinding(this.env, tel, "registrant_deleted", { accountId }));
   }
 
-  /** Cron sweep: drop the binding if it is past `exp`. */
+  /** Cron sweep: drop the binding if its verification ran out. */
   expire(tel: string, nowSec: number): Promise<boolean> {
     return this.serial(() => expireBinding(this.env, tel, nowSec));
+  }
+
+  /** Cron: re-sign the record with a fresh short `exp`, no call. */
+  resign(tel: string, nowSec: number): Promise<boolean> {
+    return this.serial(() => resignBinding(this.env, tel, nowSec));
   }
 
   /** Test and debugging hook; never exposed over HTTP. */

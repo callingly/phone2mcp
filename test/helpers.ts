@@ -77,6 +77,7 @@ export async function bindNumber(opts: { token: string; key?: ServerKey; tel?: s
       mcp_url: opts.mcp_url ?? "https://mcp.acmeplumbing.com/mcp",
       server_key: key.publicKey,
       registrant: opts.registrant ?? "acmeplumbing.com",
+      attest_control: true,
     },
   });
   if (claim.status !== 201) throw new Error(`claim: ${claim.status} ${JSON.stringify(claim.body)}`);

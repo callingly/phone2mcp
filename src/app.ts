@@ -30,6 +30,10 @@ const ClaimInput = z.object({
     .max(2048),
   server_key: z.string().refine(isEd25519PublicKey, "must be a base64url raw Ed25519 public key"),
   registrant: domain,
+  // The registry places an automated call to the number, so the registrant
+  // must attest it controls the number (and may have it called). TCPA review
+  // is still required before self-serve sign-ups.
+  attest_control: z.literal(true, "must be true: you attest you control this number and consent to a verification call"),
 });
 
 const ChallengeResponseInput = z.object({
@@ -95,6 +99,8 @@ const claimView = (claim: ClaimRow) => ({
   ...(claim.operator ? { operator: claim.operator } : {}),
   status: claim.status,
   ...(claim.failure_reason ? { failure_reason: claim.failure_reason } : {}),
+  ...(claim.takeover_after ? { takeover_after: claim.takeover_after } : {}),
+  attested_at: claim.attested_at,
   created_at: claim.created_at,
   updated_at: claim.updated_at,
 });
@@ -139,8 +145,12 @@ app.post("/v0/challenge-response", rateLimit((e) => e.CHALLENGE_LIMITER), async 
   const input = await body(c, ChallengeResponseInput);
   if (input instanceof Response) return input;
   const stub = c.env.CHALLENGES.get(c.env.CHALLENGES.idFromName(input.tel));
-  const result = await stub.respond(input.nonce, input.signature);
-  return result.ok ? c.json(result.binding) : error(c, result.status, result.error);
+  const r = await stub.respond(input.nonce, input.signature);
+  if (!r.ok) return error(c, r.status, r.error);
+  // A takeover by a different account is held until a confirming second call-back.
+  return r.result.status === "bound"
+    ? c.json(r.result.entry)
+    : c.json({ tel: input.tel, status: "takeover_pending", takeover_after: r.result.takeoverAfter }, 202);
 });
 
 /** Telnyx Call Control webhooks for verification calls. */
@@ -186,14 +196,16 @@ app.post("/v0/claims", requireAccount, async (c) => {
     operator,
     status: "pending",
     failure_reason: null,
+    attested_at: now,
+    takeover_after: null,
     created_at: now,
     updated_at: now,
   };
   await c.env.DB.prepare(
-    `INSERT INTO claims (id, account_id, tel, mcp_url, server_key, registrant, operator, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO claims (id, account_id, tel, mcp_url, server_key, registrant, operator, status, attested_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(claim.id, claim.account_id, claim.tel, claim.mcp_url, claim.server_key, claim.registrant, claim.operator, claim.status, now, now)
+    .bind(claim.id, claim.account_id, claim.tel, claim.mcp_url, claim.server_key, claim.registrant, claim.operator, claim.status, now, now, now)
     .run();
 
   // Spec: flag a binding whose MCP URL changes.

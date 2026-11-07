@@ -18,13 +18,16 @@ CREATE TABLE claims (
   server_key      TEXT NOT NULL,
   registrant      TEXT NOT NULL,
   operator        TEXT,
-  status          TEXT NOT NULL,      -- pending | verifying | verified | failed | superseded | revoked | expired
+  status          TEXT NOT NULL,      -- pending | verifying | held | verified | failed | superseded | revoked | expired
   failure_reason  TEXT,
+  attested_at     INTEGER NOT NULL,   -- when the registrant attested it controls the number
+  takeover_after  INTEGER,            -- held claims: when the confirming second call-back is due
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
 CREATE INDEX claims_tel ON claims(tel);
 CREATE INDEX claims_account ON claims(account_id);
+CREATE INDEX claims_takeover ON claims(status, takeover_after);
 
 -- Active bindings, one per number. The signed record is cached in KV for lookups.
 CREATE TABLE bindings (
@@ -35,8 +38,10 @@ CREATE TABLE bindings (
   record              TEXT NOT NULL,  -- compact JWS
   mcp_url             TEXT NOT NULL,
   server_key          TEXT NOT NULL,
-  iat                 INTEGER NOT NULL,
-  exp                 INTEGER NOT NULL,
+  iat                 INTEGER NOT NULL, -- of the current record
+  exp                 INTEGER NOT NULL, -- of the current record (short; re-signed daily)
+  verified_at         INTEGER NOT NULL, -- last successful call-back
+  verified_until      INTEGER NOT NULL, -- the binding lasts until here unless re-verified
   next_reverify_at    INTEGER NOT NULL,
   reverify_failures   INTEGER NOT NULL DEFAULT 0,
   mcp_url_changed_at  INTEGER,        -- set when a new binding points the number elsewhere
@@ -45,6 +50,7 @@ CREATE TABLE bindings (
 );
 CREATE INDEX bindings_next_reverify ON bindings(next_reverify_at);
 CREATE INDEX bindings_exp ON bindings(exp);
+CREATE INDEX bindings_verified_until ON bindings(verified_until);
 
 -- Revoked record ids.
 CREATE TABLE revocations (
@@ -60,7 +66,7 @@ CREATE TABLE challenges (
   id              TEXT PRIMARY KEY,
   claim_id        TEXT NOT NULL REFERENCES claims(id),
   tel             TEXT NOT NULL,
-  kind            TEXT NOT NULL,      -- claim | reverify
+  kind            TEXT NOT NULL,      -- claim | reverify | takeover
   status          TEXT NOT NULL,      -- pending | succeeded | failed
   failure_reason  TEXT,
   created_at      INTEGER NOT NULL,

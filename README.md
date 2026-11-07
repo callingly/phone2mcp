@@ -8,7 +8,7 @@ A registry that binds a phone number to an MCP server, so a buyer agent can skip
 | D1 | Accounts, claims, bindings, revocations, challenge log |
 | KV | Signed records for public lookups (`tel:<E.164>`) |
 | Durable Objects | `ChallengeDO`, one per number: the nonce, call state and timeout alarm |
-| Cron Triggers | Re-verification and expiry sweep, every 15 minutes |
+| Cron Triggers | Daily re-signing, re-verification, held takeovers and the expiry sweep, every 15 minutes |
 | jose + WebCrypto | Ed25519 JWS records |
 | Telnyx Call Control | Outbound verification call that speaks the nonce |
 | Workers Rate Limiting | Per-IP limits on lookups and challenge responses |
@@ -44,14 +44,31 @@ Each number's `ChallengeDO` is the only writer of that number's binding in D1 an
 
 Verification calls cost money and ring a real phone, so they are capped. Claim calls are limited to `CLAIM_CALLS_PER_NUMBER_PER_HOUR` (default 3) per number and `CLAIM_CALLS_PER_ACCOUNT_PER_DAY` (default 500) per account.
 
-### Re-verification
+### Record lifetime and re-verification
 
-Each record lives for 14 days. Each binding gets a random re-verification time between 40% and 75% of its lifetime. The cron job re-challenges bindings that are due. Failures are handled as follows:
+Two timers run separately:
 
-- **Soft failure** (no answer or timeout): retried after `REVERIFY_RETRY_SECONDS`. The binding is revoked after `REVERIFY_MAX_FAILURES` failures, or when no retry fits before `exp`.
+- **A signed record lasts 48 hours** (`RECORD_TTL_SECONDS`). The cron re-signs it, with no call, once it has less than 24 hours left (`RECORD_REFRESH_SECONDS`). Buyers can't check revocation, so this bounds how long a revoked or superseded record keeps verifying: at most 48 hours.
+- **A call-back verification lasts 14 days** (`VERIFICATION_TTL_SECONDS`), tracked as the binding's `verified_until`. A record is never signed past it, and the binding expires when it runs out.
+
+This departs from the spec's default of a 14-day record `exp`.
+
+Each binding gets a random re-verification time between 40% and 75% of its verification window. The cron job re-challenges bindings that are due. Failures are handled as follows:
+
+- **Soft failure** (no answer or timeout): retried after `REVERIFY_RETRY_SECONDS`. The binding is revoked after `REVERIFY_MAX_FAILURES` failures, or when no retry fits before `verified_until`.
 - **Hard failure** (validly signed wrong nonces): the binding is revoked at once.
 
-When a different system proves control of a number that is already bound, the old record is revoked as `superseded`. If the MCP URL changed, lookups carry an unsigned `mcp_url_changed_at` hint. The new claim also returns a warning.
+### Takeovers
+
+When a different account proves control of a number that is already bound, the number does not switch at once:
+
+1. The claim goes to `held` for `TAKEOVER_HOLD_SECONDS` (48 hours), and the current binding keeps working. The challenge response returns `202` with `takeover_after`.
+2. When the hold ends, the registry calls the number again (challenge kind `takeover`).
+3. A second success switches the number, and the old record is revoked as `superseded`. A failure fails the claim and leaves the current binding alone.
+
+A brief call-forwarding or SIM-swap hijack can't pass two calls 48 hours apart. The same account moving its own number switches at once. Setting `TAKEOVER_HOLD_SECONDS=0` turns the hold off.
+
+If the MCP URL changed, lookups carry an unsigned `mcp_url_changed_at` hint, and a claim for an already-bound number returns a warning.
 
 ## API
 
@@ -61,8 +78,8 @@ When a different system proves control of a number that is already bound, the ol
 | GET | `/v0/lookup/{tel}` | public, rate-limited | `{ tel, record }` or 404 |
 | POST | `/v0/lookup` | public, rate-limited | `{ tels: [...] }` with up to 50 numbers, returns `{ results: [{ tel, record \| null }] }` |
 | POST | `/v0/challenge-response` | public, rate-limited | Called by the MCP server with the signed nonce |
-| POST | `/v0/claims` | API key | Start a claim: `{ tel, mcp_url, server_key, registrant }` |
-| GET | `/v0/claims/{id}` | API key | Claim status: `pending`, `verifying`, `verified`, `failed`, `superseded`, `revoked` or `expired` |
+| POST | `/v0/claims` | API key | Start a claim: `{ tel, mcp_url, server_key, registrant, attest_control: true }` |
+| GET | `/v0/claims/{id}` | API key | Claim status: `pending`, `verifying`, `held`, `verified`, `failed`, `superseded`, `revoked` or `expired` |
 | POST | `/v0/claims/{id}/verify` | API key | Place the call-back challenge |
 | DELETE | `/v0/bindings/{tel}` | API key | Remove your binding and revoke its record |
 | POST | `/v0/admin/accounts` | `ADMIN_TOKEN` | Create a registrant account: `{ name, operator? }`. Returns the API key once. |
@@ -167,7 +184,9 @@ Not done yet:
 
 - The Telnyx integration has not been tested against a live account.
 - The nonce is spoken only, not sent as DTMF (an open question in the spec).
-- There is no revocation list endpoint. Buyers rely on short record lifetimes.
+- There is no revocation list endpoint. Buyers rely on the 48-hour record lifetime.
+- **Robocall rules (TCPA).** The registry places automated, artificial-voice calls. Every claim must carry `attest_control: true`, meaning the registrant attests it controls the number and consents to the call; the time is stored as `attested_at`. Only admin-created accounts can make claims. A TCPA review is still needed before opening self-serve sign-ups.
+- The current registrant isn't notified when a takeover is held, because the registry has no notification channel yet.
 
 ## License
 
