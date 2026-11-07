@@ -40,7 +40,8 @@ export async function createAccount(operator = "callingly.com") {
 
 export interface ServerKey {
   publicKey: string;
-  sign(tel: string, nonce: string): Promise<string>;
+  /** Signs a challenge response for `mcpUrl` (default: the URL most tests claim). */
+  sign(tel: string, nonce: string, mcpUrl?: string): Promise<string>;
 }
 
 /** An MCP server's key pair. */
@@ -49,8 +50,8 @@ export async function serverKey(): Promise<ServerKey> {
   const raw = new Uint8Array((await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer);
   return {
     publicKey: base64urlEncode(raw),
-    async sign(tel, nonce) {
-      const sig = await crypto.subtle.sign({ name: "Ed25519" }, pair.privateKey, challengeResponseMessage(tel, nonce));
+    async sign(tel, nonce, mcpUrl = "https://a.example/mcp") {
+      const sig = await crypto.subtle.sign({ name: "Ed25519" }, pair.privateKey, challengeResponseMessage(tel, nonce, mcpUrl));
       return base64urlEncode(new Uint8Array(sig));
     },
   };
@@ -70,11 +71,12 @@ export async function liveNonce(tel: string): Promise<string> {
 export async function bindNumber(opts: { token: string; key?: ServerKey; tel?: string; mcp_url?: string; registrant?: string }) {
   const key = opts.key ?? (await serverKey());
   const tel = opts.tel ?? freshTel();
+  const mcpUrl = opts.mcp_url ?? "https://mcp.acmeplumbing.com/mcp";
   const claim = await api("POST", "/v0/claims", {
     token: opts.token,
     json: {
       tel,
-      mcp_url: opts.mcp_url ?? "https://mcp.acmeplumbing.com/mcp",
+      mcp_url: mcpUrl,
       server_key: key.publicKey,
       registrant: opts.registrant ?? "acmeplumbing.com",
       attest_control: true,
@@ -84,7 +86,7 @@ export async function bindNumber(opts: { token: string; key?: ServerKey; tel?: s
   const verify = await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: opts.token });
   if (verify.status !== 202) throw new Error(`verify: ${verify.status} ${JSON.stringify(verify.body)}`);
   const nonce = await liveNonce(tel);
-  const res = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce) } });
+  const res = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce, mcpUrl) } });
   if (res.status !== 200) throw new Error(`challenge-response: ${res.status} ${JSON.stringify(res.body)}`);
   return { tel, key, claimId: claim.body.id as string, entry: res.body as { tel: string; record: string } };
 }

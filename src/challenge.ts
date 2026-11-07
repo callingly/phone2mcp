@@ -24,6 +24,7 @@ const SEEN_EVENTS = 32;
 export interface ChallengeState extends ChallengeSubject {
   nonce: string;
   serverKey: string;
+  mcpUrl: string;
   status: "dialing" | "answered";
   callId?: string;
   spoken: number;
@@ -35,6 +36,8 @@ export interface BeginInput {
   tel: string;
   claimId: string;
   serverKey: string;
+  /** The MCP URL being proven; part of the signed response. */
+  mcpUrl: string;
   kind: ChallengeSubject["kind"];
 }
 
@@ -93,6 +96,7 @@ export class ChallengeDO extends DurableObject<Env> {
         claimId: input.claimId,
         kind: input.kind,
         serverKey: input.serverKey,
+        mcpUrl: input.mcpUrl,
         nonce: randomDigits(nonceDigits),
         status: "dialing",
         spoken: 0,
@@ -182,7 +186,7 @@ export class ChallengeDO extends DurableObject<Env> {
         return { ok: false, status: 400, error: "invalid_signature_encoding" };
       }
       // Check the signature first, so only the key holder can use up attempts.
-      const valid = await verifyEd25519(base64urlDecode(s.serverKey), sig, challengeResponseMessage(s.tel, nonce));
+      const valid = await verifyEd25519(base64urlDecode(s.serverKey), sig, challengeResponseMessage(s.tel, nonce, s.mcpUrl));
       if (!valid) return { ok: false, status: 401, error: "bad_signature" };
 
       if (!timingSafeEqual(nonce, s.nonce)) {

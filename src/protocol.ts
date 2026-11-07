@@ -31,16 +31,19 @@ export interface BindingRecord {
 /**
  * The exact bytes an MCP server signs with its `server_key` to answer a
  * call-back challenge. `nonce` is the code the registry spoke on the call.
+ * `mcpUrl` is the claimed MCP URL, so a signature only vouches for the URL
+ * the key holder means: a claim that pairs someone's public key with a
+ * different URL can't be completed with their signature.
  */
-export function challengeResponseMessage(tel: string, nonce: string): Uint8Array {
-  return new TextEncoder().encode(`phone2mcp/${PROTOCOL_VERSION} challenge-response\n${tel}\n${nonce}`);
+export function challengeResponseMessage(tel: string, nonce: string, mcpUrl: string): Uint8Array {
+  return new TextEncoder().encode(`phone2mcp/${PROTOCOL_VERSION} challenge-response\n${tel}\n${nonce}\n${mcpUrl}`);
 }
 
 /** Body of `POST /v0/challenge-response`. */
 export interface ChallengeResponseBody {
   tel: string;
   nonce: string;
-  /** base64url Ed25519 signature over `challengeResponseMessage(tel, nonce)`. */
+  /** base64url Ed25519 signature over `challengeResponseMessage(tel, nonce, mcp_url)`. */
   signature: string;
 }
 

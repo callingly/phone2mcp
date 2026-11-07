@@ -241,7 +241,7 @@ app.post("/v0/claims/:id/verify", requireAccount, async (c) => {
   if ((placed?.n ?? 0) >= config(c.env).claimCallsPerAccountPerDay) return error(c, 429, "account_call_budget_exceeded");
 
   const stub = c.env.CHALLENGES.get(c.env.CHALLENGES.idFromName(claim.tel));
-  const result = await stub.begin({ tel: claim.tel, claimId: claim.id, serverKey: claim.server_key, kind: "claim" });
+  const result = await stub.begin({ tel: claim.tel, claimId: claim.id, serverKey: claim.server_key, mcpUrl: claim.mcp_url, kind: "claim" });
   if (!result.ok) {
     const status = { challenge_in_progress: 409, number_cooldown: 429, call_failed: 502 }[result.error];
     return error(c, status, result.error);

@@ -112,7 +112,13 @@ describe("call-back verification", () => {
     const forged = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await other.sign(tel, nonce) } });
     expect(forged.status).toBe(401);
 
-    const res = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce) } });
+    // The right key signing for a different MCP URL: rejected, so a claim that
+    // pairs someone's public key with another URL can't be completed.
+    const otherUrl = await api("POST", "/v0/challenge-response", {
+      json: { tel, nonce, signature: await key.sign(tel, nonce, "https://evil.example/mcp") },
+    });
+    expect(otherUrl.status).toBe(401);
+    const res = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce, "https://mcp.acmeplumbing.com/mcp") } });
     expect(res.status).toBe(200);
     expect(res.body.tel).toBe(tel);
 
@@ -136,7 +142,7 @@ describe("call-back verification", () => {
     expect(record.jti).toBeTruthy();
 
     // The nonce is single-use.
-    expect((await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce) } })).status).toBe(404);
+    expect((await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce, "https://mcp.acmeplumbing.com/mcp") } })).status).toBe(404);
 
     const looked = await api("GET", `/v0/lookup/${encodeURIComponent(tel)}`);
     expect(looked.status).toBe(200);
@@ -358,7 +364,7 @@ describe("bindings", () => {
     expect(claim.body.warnings).toEqual(["number_already_bound_to_different_mcp_url"]);
     await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: second.api_key });
     let nonce = await liveNonce(tel);
-    const first_proof = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce) } });
+    const first_proof = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce, "https://new.example/mcp") } });
     expect(first_proof.status).toBe(202);
     expect(first_proof.body).toMatchObject({ tel, status: "takeover_pending" });
 
@@ -375,7 +381,7 @@ describe("bindings", () => {
     expect((await runScheduled(env)).takeovers).toBe(1);
     expect((await challengeStub(tel).inspect())?.kind).toBe("takeover");
     nonce = await liveNonce(tel);
-    const confirmed = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce) } });
+    const confirmed = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce, "https://new.example/mcp") } });
     expect(confirmed.status).toBe(200);
 
     const looked = await api("GET", `/v0/lookup/${tel}`);
@@ -402,7 +408,7 @@ describe("bindings", () => {
     });
     await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: second.api_key });
     const nonce = await liveNonce(tel);
-    expect((await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce) } })).status).toBe(202);
+    expect((await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce, "https://new.example/mcp") } })).status).toBe(202);
 
     // A brief hijack: by the confirming call the number answers elsewhere, so it times out.
     await env.DB.prepare("UPDATE claims SET takeover_after = 0 WHERE id = ?").bind(claim.body.id).run();
@@ -504,7 +510,7 @@ describe("scheduled re-verification", () => {
     expect((await challengeStub(tel).inspect())?.kind).toBe("reverify");
 
     const nonce = await liveNonce(tel);
-    const res = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce) } });
+    const res = await api("POST", "/v0/challenge-response", { json: { tel, nonce, signature: await key.sign(tel, nonce, "https://mcp.acmeplumbing.com/mcp") } });
     expect(res.status).toBe(200);
     expect(res.body.record).not.toBe(entry.record);
     expect((await verifyRecord(res.body.record)).jti).not.toBe((await verifyRecord(entry.record)).jti);
@@ -533,7 +539,7 @@ describe("scheduled re-verification", () => {
     const nonce = await liveNonce(tel);
     const wrong = nonce === "00000000" ? "11111111" : "00000000";
     for (let i = 0; i < 3; i++) {
-      await api("POST", "/v0/challenge-response", { json: { tel, nonce: wrong, signature: await key.sign(tel, wrong) } });
+      await api("POST", "/v0/challenge-response", { json: { tel, nonce: wrong, signature: await key.sign(tel, wrong, "https://mcp.acmeplumbing.com/mcp") } });
     }
     expect((await api("GET", `/v0/lookup/${tel}`)).status).toBe(404);
   });

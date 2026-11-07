@@ -24,11 +24,13 @@ A registry that binds a phone number to an MCP server, so a buyer agent can skip
    { "tel": "+16025550100", "nonce": "48151623", "signature": "<base64url Ed25519 signature>" }
    ```
 
-   The signed bytes are `challengeResponseMessage(tel, nonce)` from [`src/protocol.ts`](src/protocol.ts):
+   The signed bytes are `challengeResponseMessage(tel, nonce, mcp_url)` from [`src/protocol.ts`](src/protocol.ts):
 
    ```
-   phone2mcp/0.1 challenge-response\n<tel>\n<nonce>
+   phone2mcp/0.1 challenge-response\n<tel>\n<nonce>\n<mcp_url>
    ```
+
+   `mcp_url` is the URL in the claim. Signing it means a key holder only vouches for its own URL: anyone can see a server's public key, but a claim that pairs it with a different URL can't be completed with that server's signature.
 
 5. The registry checks the signature against the claimed `server_key` and then checks the nonce. If both pass, it signs a binding record, stores it in D1 and KV, and returns it.
 

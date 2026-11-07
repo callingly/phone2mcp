@@ -38,21 +38,21 @@ export async function runScheduled(
   const resigned = await Promise.all(stale.results.map((b) => stub(env, b.tel).resign(b.tel, nowSec)));
 
   const due = await env.DB.prepare(
-    "SELECT tel, claim_id, server_key FROM bindings WHERE next_reverify_at <= ? AND verified_until > ? ORDER BY next_reverify_at LIMIT ?",
+    "SELECT tel, claim_id, server_key, mcp_url FROM bindings WHERE next_reverify_at <= ? AND verified_until > ? ORDER BY next_reverify_at LIMIT ?",
   )
     .bind(nowSec, nowSec, REVERIFY_BATCH)
-    .all<Pick<BindingRow, "tel" | "claim_id" | "server_key">>();
+    .all<Pick<BindingRow, "tel" | "claim_id" | "server_key" | "mcp_url">>();
   const started = await Promise.all(
-    due.results.map((b) => stub(env, b.tel).begin({ tel: b.tel, claimId: b.claim_id, serverKey: b.server_key, kind: "reverify" })),
+    due.results.map((b) => stub(env, b.tel).begin({ tel: b.tel, claimId: b.claim_id, serverKey: b.server_key, mcpUrl: b.mcp_url, kind: "reverify" })),
   );
 
   const held = await env.DB.prepare(
-    "SELECT id, tel, server_key FROM claims WHERE status = 'held' AND takeover_after <= ? ORDER BY takeover_after LIMIT ?",
+    "SELECT id, tel, server_key, mcp_url FROM claims WHERE status = 'held' AND takeover_after <= ? ORDER BY takeover_after LIMIT ?",
   )
     .bind(nowSec, REVERIFY_BATCH)
-    .all<Pick<ClaimRow, "id" | "tel" | "server_key">>();
+    .all<Pick<ClaimRow, "id" | "tel" | "server_key" | "mcp_url">>();
   const takeovers = await Promise.all(
-    held.results.map((cl) => stub(env, cl.tel).begin({ tel: cl.tel, claimId: cl.id, serverKey: cl.server_key, kind: "takeover" })),
+    held.results.map((cl) => stub(env, cl.tel).begin({ tel: cl.tel, claimId: cl.id, serverKey: cl.server_key, mcpUrl: cl.mcp_url, kind: "takeover" })),
   );
 
   return {
