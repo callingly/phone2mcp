@@ -126,31 +126,32 @@ export class ChallengeDO extends DurableObject<Env> {
         if (event.type !== "hangup") await tel.hangup(event.callId);
         return;
       }
-      // Providers redeliver webhooks; apply each event once.
-      if (event.eventId) {
-        if (s.seenEvents.includes(event.eventId)) return;
-        s.seenEvents = [...s.seenEvents, event.eventId].slice(-SEEN_EVENTS);
-      }
+      // Providers redeliver webhooks, so apply each event once. State, including
+      // the event id, is saved only after the Telnyx action succeeds: if it
+      // throws, the webhook fails and Telnyx's redelivery retries it.
+      if (event.eventId && s.seenEvents.includes(event.eventId)) return;
+      const next: ChallengeState = {
+        ...s,
+        seenEvents: event.eventId ? [...s.seenEvents, event.eventId].slice(-SEEN_EVENTS) : s.seenEvents,
+      };
       switch (event.type) {
         case "answered":
-          if (s.status === "answered") break;
-          s.status = "answered";
-          s.callId = event.callId;
-          await this.ctx.storage.put("state", s);
-          await tel.speak(event.callId, challengeScript(s.nonce, 0), this.callState(s));
-          return;
+          if (s.status !== "answered") {
+            await tel.speak(event.callId, challengeScript(s.nonce, 0), this.callState(s));
+            Object.assign(next, { status: "answered", callId: event.callId });
+          }
+          break;
         case "speak_ended":
-          s.spoken += 1;
-          await this.ctx.storage.put("state", s);
-          if (s.spoken < SPEAK_REPEATS) await tel.speak(event.callId, challengeScript(s.nonce, s.spoken), this.callState(s));
+          next.spoken = s.spoken + 1;
+          if (next.spoken < SPEAK_REPEATS) await tel.speak(event.callId, challengeScript(s.nonce, next.spoken), this.callState(s));
           else await tel.hangup(event.callId);
-          return;
+          break;
         case "hangup":
           // Hung up before anyone answered: no point waiting for the timeout.
           if (s.status === "dialing") return this.fail(s, `no_answer:${event.cause ?? "unknown"}`, false);
           break;
       }
-      await this.ctx.storage.put("state", s);
+      await this.ctx.storage.put("state", next);
     });
   }
 

@@ -1,4 +1,5 @@
 import { env, runDurableObjectAlarm } from "cloudflare:test";
+import { mockTelephony } from "../src/telephony";
 import { compactVerify, createLocalJWKSet, decodeProtectedHeader } from "jose";
 import { describe, expect, it } from "vitest";
 import { runScheduled } from "../src/cron";
@@ -250,6 +251,37 @@ describe("Telnyx webhooks", () => {
     await signedWebhook(ended);
     await signedWebhook(ended);
     expect((await challengeStub(tel).inspect())?.spoken).toBe(1);
+  });
+
+  it("retries speech when Telnyx rejects it and the webhook is redelivered", async () => {
+    const { api_key } = await createAccount();
+    const key = await serverKey();
+    const tel = freshTel();
+    const claim = await api("POST", "/v0/claims", {
+      token: api_key,
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+    });
+    const { body } = await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
+    const answered = { data: { ...event("call.answered", tel, body.challenge_id).data, id: "evt-answer" } };
+
+    const realSpeak = mockTelephony.speak;
+    const spoken: string[] = [];
+    mockTelephony.speak = async () => {
+      throw new Error("telnyx 503");
+    };
+    try {
+      expect((await signedWebhook(answered)).status).toBe(500);
+    } finally {
+      mockTelephony.speak = async (_id, text) => {
+        spoken.push(text);
+      };
+    }
+    expect((await challengeStub(tel).inspect())?.status).toBe("dialing");
+
+    expect((await signedWebhook(answered)).status).toBe(200);
+    mockTelephony.speak = realSpeak;
+    expect(spoken).toHaveLength(1);
+    expect(await challengeStub(tel).inspect()).toMatchObject({ status: "answered", seenEvents: ["evt-answer"] });
   });
 
   it("tracks the call and fails fast when nobody answers", async () => {
