@@ -1,0 +1,67 @@
+import type { ChallengeDO } from "./challenge";
+
+export interface Env {
+  DB: D1Database;
+  /** Signed records keyed by `tel:<E.164>`, read by public lookups. */
+  RECORDS: KVNamespace;
+  CHALLENGES: DurableObjectNamespace<ChallengeDO>;
+
+  /** Optional Workers rate limiting bindings; skipped when absent. */
+  LOOKUP_LIMITER?: RateLimit;
+  BATCH_LIMITER?: RateLimit;
+  CHALLENGE_LIMITER?: RateLimit;
+
+  // --- Secrets ---
+  /** Private Ed25519 JWK (with `kid`) the registry signs records with. */
+  REGISTRY_SIGNING_JWK: string;
+  /** Bearer token for `/v0/admin/*`. */
+  ADMIN_TOKEN?: string;
+  TELNYX_API_KEY?: string;
+  /** base64 Ed25519 public key from the Telnyx portal, for webhook signatures. */
+  TELNYX_PUBLIC_KEY?: string;
+
+  // --- Vars ---
+  /** JSON array of retired public JWKs still published for verification. */
+  REGISTRY_RETIRED_JWKS?: string;
+  /** Public origin of this Worker, used for Telnyx webhook URLs. */
+  PUBLIC_BASE_URL?: string;
+  /** "telnyx" (default) or "mock" (no calls placed; for tests and local dev). */
+  TELEPHONY_PROVIDER?: string;
+  TELNYX_CONNECTION_ID?: string;
+  TELNYX_FROM_NUMBER?: string;
+  TELNYX_VOICE?: string;
+  /** Lifetime of one signed record; records are re-signed daily without a call. */
+  RECORD_TTL_SECONDS?: string;
+  /** Re-sign a record once it has this little life left. */
+  RECORD_REFRESH_SECONDS?: string;
+  /** How long one successful call-back keeps a binding alive. */
+  VERIFICATION_TTL_SECONDS?: string;
+  /** How long a takeover by a different account is held before its confirming call. 0 disables the hold. */
+  TAKEOVER_HOLD_SECONDS?: string;
+  CHALLENGE_TTL_SECONDS?: string;
+  NONCE_DIGITS?: string;
+  REVERIFY_MAX_FAILURES?: string;
+  REVERIFY_RETRY_SECONDS?: string;
+  /** Claim verification calls allowed to one number per rolling hour. */
+  CLAIM_CALLS_PER_NUMBER_PER_HOUR?: string;
+  /** Claim verification calls one account may place per rolling 24 hours. */
+  CLAIM_CALLS_PER_ACCOUNT_PER_DAY?: string;
+}
+
+export function intVar(value: string | undefined, fallback: number): number {
+  const n = value === undefined || value === "" ? NaN : Number(value);
+  return Number.isFinite(n) ? Math.floor(n) : fallback;
+}
+
+export const config = (env: Env) => ({
+  recordTtl: intVar(env.RECORD_TTL_SECONDS, 48 * 3600),
+  recordRefresh: intVar(env.RECORD_REFRESH_SECONDS, 24 * 3600),
+  verificationTtl: intVar(env.VERIFICATION_TTL_SECONDS, 14 * 24 * 3600),
+  takeoverHold: intVar(env.TAKEOVER_HOLD_SECONDS, 48 * 3600),
+  challengeTtl: intVar(env.CHALLENGE_TTL_SECONDS, 180),
+  nonceDigits: Math.min(Math.max(intVar(env.NONCE_DIGITS, 8), 6), 12),
+  reverifyMaxFailures: intVar(env.REVERIFY_MAX_FAILURES, 3),
+  reverifyRetry: intVar(env.REVERIFY_RETRY_SECONDS, 3600),
+  claimCallsPerNumberPerHour: intVar(env.CLAIM_CALLS_PER_NUMBER_PER_HOUR, 3),
+  claimCallsPerAccountPerDay: intVar(env.CLAIM_CALLS_PER_ACCOUNT_PER_DAY, 500),
+});

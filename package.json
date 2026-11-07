@@ -1,0 +1,39 @@
+{
+  "name": "phone2mcp-registry",
+  "version": "0.1.0",
+  "description": "Prototype phone2mcp registry: verified bindings from phone numbers to MCP servers, on Cloudflare Workers.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "db:migrate:local": "wrangler d1 migrations apply phone2mcp --local",
+    "db:migrate": "wrangler d1 migrations apply phone2mcp --remote",
+    "gen:key": "node scripts/gen-signing-key.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/callingly/phone2mcp.git"
+  },
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/callingly/phone2mcp/issues"
+  },
+  "homepage": "https://github.com/callingly/phone2mcp#readme",
+  "dependencies": {
+    "hono": "^4.13.16",
+    "jose": "^6.2.15",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.6.0",
+    "@cloudflare/workers-types": "^5.20261107.1",
+    "@vitest/runner": "~4.1.0",
+    "@vitest/snapshot": "~4.1.0",
+    "typescript": "^5.9.3",
+    "vitest": "~4.1.0",
+    "wrangler": "^4.158.0"
+  },
+  "private": true,
+  "type": "module"
+}
