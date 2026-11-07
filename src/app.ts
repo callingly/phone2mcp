@@ -162,7 +162,8 @@ app.post("/v0/telephony/telnyx", async (c) => {
   }
   if (parsed) {
     const stub = c.env.CHALLENGES.get(c.env.CHALLENGES.idFromName(parsed.state.t));
-    await stub.onTelephonyEvent(parsed.state.c, parsed.event);
+    // Non-2xx makes Telnyx redeliver, which retries the failed action.
+    if (!(await stub.onTelephonyEvent(parsed.state.c, parsed.event))) return error(c, 503, "telephony_action_failed");
   }
   return c.json({ ok: true });
 });

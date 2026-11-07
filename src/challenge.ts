@@ -116,43 +116,56 @@ export class ChallengeDO extends DurableObject<Env> {
     });
   }
 
-  /** Telephony webhooks, already authenticated by the Worker. */
-  onTelephonyEvent(challengeId: string, event: TelephonyEvent): Promise<void> {
+  /**
+   * Telephony webhooks, already authenticated by the Worker. Returns false when
+   * a Telnyx action failed, so the Worker answers non-2xx and Telnyx redelivers.
+   */
+  onTelephonyEvent(challengeId: string, event: TelephonyEvent): Promise<boolean> {
     return this.serial(async () => {
-      const s = await this.load();
-      const tel = telephony(this.env);
-      if (!s || s.id !== challengeId) {
-        // A stale call for a finished challenge: make sure it does not linger.
-        if (event.type !== "hangup") await tel.hangup(event.callId);
-        return;
+      try {
+        await this.applyTelephonyEvent(challengeId, event);
+        return true;
+      } catch (err) {
+        console.error("telephony event failed; awaiting redelivery", err);
+        return false;
       }
-      // Providers redeliver webhooks, so apply each event once. State, including
-      // the event id, is saved only after the Telnyx action succeeds: if it
-      // throws, the webhook fails and Telnyx's redelivery retries it.
-      if (event.eventId && s.seenEvents.includes(event.eventId)) return;
-      const next: ChallengeState = {
-        ...s,
-        seenEvents: event.eventId ? [...s.seenEvents, event.eventId].slice(-SEEN_EVENTS) : s.seenEvents,
-      };
-      switch (event.type) {
-        case "answered":
-          if (s.status !== "answered") {
-            await tel.speak(event.callId, challengeScript(s.nonce, 0), this.callState(s));
-            Object.assign(next, { status: "answered", callId: event.callId });
-          }
-          break;
-        case "speak_ended":
-          next.spoken = s.spoken + 1;
-          if (next.spoken < SPEAK_REPEATS) await tel.speak(event.callId, challengeScript(s.nonce, next.spoken), this.callState(s));
-          else await tel.hangup(event.callId);
-          break;
-        case "hangup":
-          // Hung up before anyone answered: no point waiting for the timeout.
-          if (s.status === "dialing") return this.fail(s, `no_answer:${event.cause ?? "unknown"}`, false);
-          break;
-      }
-      await this.ctx.storage.put("state", next);
     });
+  }
+
+  private async applyTelephonyEvent(challengeId: string, event: TelephonyEvent): Promise<void> {
+    const s = await this.load();
+    const tel = telephony(this.env);
+    if (!s || s.id !== challengeId) {
+      // A stale call for a finished challenge: make sure it does not linger.
+      if (event.type !== "hangup") await tel.hangup(event.callId);
+      return;
+    }
+    // Providers redeliver webhooks, so apply each event once. State, including
+    // the event id, is saved only after the Telnyx action succeeds: if it
+    // throws, the webhook fails and Telnyx's redelivery retries it.
+    if (event.eventId && s.seenEvents.includes(event.eventId)) return;
+    const next: ChallengeState = {
+      ...s,
+      seenEvents: event.eventId ? [...s.seenEvents, event.eventId].slice(-SEEN_EVENTS) : s.seenEvents,
+    };
+    switch (event.type) {
+      case "answered":
+        if (s.status !== "answered") {
+          await tel.speak(event.callId, challengeScript(s.nonce, 0), this.callState(s));
+          Object.assign(next, { status: "answered", callId: event.callId });
+        }
+        break;
+      case "speak_ended":
+        next.spoken = s.spoken + 1;
+        if (next.spoken < SPEAK_REPEATS) await tel.speak(event.callId, challengeScript(s.nonce, next.spoken), this.callState(s));
+        else await tel.hangup(event.callId);
+        break;
+      case "hangup":
+        // Hung up before anyone answered: no point waiting for the timeout.
+        if (s.status === "dialing") return this.fail(s, `no_answer:${event.cause ?? "unknown"}`, false);
+        break;
+    }
+    await this.ctx.storage.put("state", next);
   }
 
   /** The MCP server returns the nonce it heard, signed with its server key. */

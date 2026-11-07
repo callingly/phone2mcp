@@ -270,7 +270,7 @@ describe("Telnyx webhooks", () => {
       throw new Error("telnyx 503");
     };
     try {
-      expect((await signedWebhook(answered)).status).toBe(500);
+      expect((await signedWebhook(answered)).status).toBe(503);
     } finally {
       mockTelephony.speak = async (_id, text) => {
         spoken.push(text);
