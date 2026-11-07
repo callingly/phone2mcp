@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `npm run dev`. Generate the key with: node scripts/gen-signing-key.mjs
+REGISTRY_SIGNING_JWK='{"kty":"OKP","crv":"Ed25519","d":"...","x":"...","kid":"dev"}'
+ADMIN_TOKEN=dev-admin-token
+TELEPHONY_PROVIDER=mock

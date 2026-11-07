@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "phone2mcp-registry",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+
+  // Create with `npx wrangler d1 create phone2mcp` and paste the id.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "phone2mcp", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+  // Create with `npx wrangler kv namespace create RECORDS` and paste the id.
+  "kv_namespaces": [{ "binding": "RECORDS", "id": "00000000000000000000000000000000" }],
+
+  "durable_objects": { "bindings": [{ "name": "CHALLENGES", "class_name": "ChallengeDO" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ChallengeDO"] }],
+
+  // Re-verification and expiry sweep.
+  "triggers": { "crons": ["*/15 * * * *"] },
+
+  // Per-IP limits. Batch lookups get a lower limit since each covers up to 50 numbers.
+  "ratelimits": [
+    { "name": "LOOKUP_LIMITER", "namespace_id": "1001", "simple": { "limit": 300, "period": 60 } },
+    { "name": "BATCH_LIMITER", "namespace_id": "1002", "simple": { "limit": 20, "period": 60 } },
+    { "name": "CHALLENGE_LIMITER", "namespace_id": "1003", "simple": { "limit": 30, "period": 60 } }
+  ],
+
+  "vars": {
+    "PUBLIC_BASE_URL": "https://registry.example.org",
+    "TELEPHONY_PROVIDER": "telnyx",
+    "TELNYX_CONNECTION_ID": "",
+    "TELNYX_FROM_NUMBER": "",
+    "TELNYX_VOICE": "female",
+    "RECORD_TTL_SECONDS": "1209600",
+    "CHALLENGE_TTL_SECONDS": "180",
+    "NONCE_DIGITS": "8",
+    "REVERIFY_MAX_FAILURES": "3",
+    "REVERIFY_RETRY_SECONDS": "3600"
+  }
+  // Secrets (wrangler secret put): REGISTRY_SIGNING_JWK, ADMIN_TOKEN, TELNYX_API_KEY, TELNYX_PUBLIC_KEY
+}
