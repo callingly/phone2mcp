@@ -132,6 +132,39 @@ describe("call-back verification", () => {
     expect((await api("GET", `/v0/claims/${claim.body.id}`, { token: api_key })).body.status).toBe("verified");
   });
 
+  it("accepts only one of two simultaneous correct responses", async () => {
+    const { api_key } = await createAccount();
+    const key = await serverKey();
+    const tel = freshTel();
+    const claim = await api("POST", "/v0/claims", {
+      token: api_key,
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+    });
+    await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
+    const nonce = await liveNonce(tel);
+    const json = { tel, nonce, signature: await key.sign(tel, nonce) };
+    const results = await Promise.all([api("POST", "/v0/challenge-response", { json }), api("POST", "/v0/challenge-response", { json })]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 404]);
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM bindings WHERE tel = ?").bind(tel).first<{ n: number }>();
+    expect(count?.n).toBe(1);
+  });
+
+  it("limits how often a number can be called for claims", async () => {
+    const { api_key } = await createAccount();
+    const key = await serverKey();
+    const tel = freshTel();
+    const claim = await api("POST", "/v0/claims", {
+      token: api_key,
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+    });
+    for (let i = 0; i < 3; i++) {
+      expect((await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key })).status).toBe(202);
+      await runDurableObjectAlarm(challengeStub(tel));
+    }
+    const fourth = await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
+    expect(fourth).toMatchObject({ status: 429, body: { error: "number_cooldown" } });
+  });
+
   it("fails the claim after three wrong nonces", async () => {
     const { api_key } = await createAccount();
     const key = await serverKey();
@@ -200,6 +233,23 @@ describe("Telnyx webhooks", () => {
   it("rejects unsigned or tampered webhooks", async () => {
     expect((await api("POST", "/v0/telephony/telnyx", { json: { data: {} } })).status).toBe(401);
     expect((await signedWebhook(event("call.answered", "+16025550100", "chl_x"), { tamper: true })).status).toBe(401);
+  });
+
+  it("applies a redelivered webhook only once", async () => {
+    const { api_key } = await createAccount();
+    const key = await serverKey();
+    const tel = freshTel();
+    const claim = await api("POST", "/v0/claims", {
+      token: api_key,
+      json: { tel, mcp_url: "https://a.example/mcp", server_key: key.publicKey, registrant: "a.example" },
+    });
+    const { body } = await api("POST", `/v0/claims/${claim.body.id}/verify`, { token: api_key });
+    await signedWebhook(event("call.answered", tel, body.challenge_id));
+    const base = event("call.speak.ended", tel, body.challenge_id);
+    const ended = { data: { ...base.data, id: "evt-1" } };
+    await signedWebhook(ended);
+    await signedWebhook(ended);
+    expect((await challengeStub(tel).inspect())?.spoken).toBe(1);
   });
 
   it("tracks the call and fails fast when nobody answers", async () => {

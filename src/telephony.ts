@@ -17,10 +17,11 @@ export interface Telephony {
   hangup(callId: string): Promise<void>;
 }
 
-export type TelephonyEvent =
-  | { type: "answered"; callId: string }
-  | { type: "speak_ended"; callId: string }
-  | { type: "hangup"; callId: string; cause?: string };
+export type TelephonyEvent = { callId: string; eventId?: string } & (
+  | { type: "answered" }
+  | { type: "speak_ended" }
+  | { type: "hangup"; cause?: string }
+);
 
 export function telephony(env: Env): Telephony {
   return (env.TELEPHONY_PROVIDER ?? "telnyx") === "mock" ? mockTelephony : new TelnyxTelephony(env);
@@ -116,13 +117,14 @@ export function parseTelnyxWebhook(body: any): { state: CallState; event: Teleph
   const state = decodeCallState(p?.client_state);
   const callId = p?.call_control_id;
   if (!state || typeof callId !== "string") return null;
+  const eventId = typeof body?.data?.id === "string" ? body.data.id : undefined;
   switch (type) {
     case "call.answered":
-      return { state, event: { type: "answered", callId } };
+      return { state, event: { type: "answered", callId, eventId } };
     case "call.speak.ended":
-      return { state, event: { type: "speak_ended", callId } };
+      return { state, event: { type: "speak_ended", callId, eventId } };
     case "call.hangup":
-      return { state, event: { type: "hangup", callId, cause: p?.hangup_cause } };
+      return { state, event: { type: "hangup", callId, eventId, cause: p?.hangup_cause } };
     default:
       return null;
   }

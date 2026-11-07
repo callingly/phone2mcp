@@ -35,6 +35,10 @@ export interface Env {
   NONCE_DIGITS?: string;
   REVERIFY_MAX_FAILURES?: string;
   REVERIFY_RETRY_SECONDS?: string;
+  /** Claim verification calls allowed to one number per rolling hour. */
+  CLAIM_CALLS_PER_NUMBER_PER_HOUR?: string;
+  /** Claim verification calls one account may place per rolling 24 hours. */
+  CLAIM_CALLS_PER_ACCOUNT_PER_DAY?: string;
 }
 
 export function intVar(value: string | undefined, fallback: number): number {
@@ -48,4 +52,6 @@ export const config = (env: Env) => ({
   nonceDigits: Math.min(Math.max(intVar(env.NONCE_DIGITS, 8), 6), 12),
   reverifyMaxFailures: intVar(env.REVERIFY_MAX_FAILURES, 3),
   reverifyRetry: intVar(env.REVERIFY_RETRY_SECONDS, 3600),
+  claimCallsPerNumberPerHour: intVar(env.CLAIM_CALLS_PER_NUMBER_PER_HOUR, 3),
+  claimCallsPerAccountPerDay: intVar(env.CLAIM_CALLS_PER_ACCOUNT_PER_DAY, 500),
 });

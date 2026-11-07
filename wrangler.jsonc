@@ -4,6 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "observability": { "enabled": true },
+  "routes": [{ "pattern": "registry.phone2mcp.com", "custom_domain": true }],
 
   // Create with `npx wrangler d1 create phone2mcp` and paste the id.
   "d1_databases": [
@@ -26,7 +27,7 @@
   ],
 
   "vars": {
-    "PUBLIC_BASE_URL": "https://registry.example.org",
+    "PUBLIC_BASE_URL": "https://registry.phone2mcp.com",
     "TELEPHONY_PROVIDER": "telnyx",
     "TELNYX_CONNECTION_ID": "",
     "TELNYX_FROM_NUMBER": "",
@@ -35,7 +36,9 @@
     "CHALLENGE_TTL_SECONDS": "180",
     "NONCE_DIGITS": "8",
     "REVERIFY_MAX_FAILURES": "3",
-    "REVERIFY_RETRY_SECONDS": "3600"
+    "REVERIFY_RETRY_SECONDS": "3600",
+    "CLAIM_CALLS_PER_NUMBER_PER_HOUR": "3",
+    "CLAIM_CALLS_PER_ACCOUNT_PER_DAY": "500"
   }
   // Secrets (wrangler secret put): REGISTRY_SIGNING_JWK, ADMIN_TOKEN, TELNYX_API_KEY, TELNYX_PUBLIC_KEY
 }

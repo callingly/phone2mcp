@@ -38,6 +38,11 @@ Failure handling:
 - Three validly signed wrong nonces fail the challenge.
 - If nobody answers the call, the challenge fails straight away.
 - Otherwise a challenge times out after `CHALLENGE_TTL_SECONDS`, which defaults to 180.
+- Repeated Telnyx webhooks are applied only once, matched by event id.
+
+Each number's `ChallengeDO` is the only writer of that number's binding in D1 and KV. It runs issuance, deletion, failure handling and expiry one at a time, so they can't interleave.
+
+Verification calls cost money and ring a real phone, so they are capped. Claim calls are limited to `CLAIM_CALLS_PER_NUMBER_PER_HOUR` (default 3) per number and `CLAIM_CALLS_PER_ACCOUNT_PER_DAY` (default 500) per account.
 
 ### Re-verification
 
@@ -141,7 +146,7 @@ npm run dev
    npx wrangler secret put TELNYX_PUBLIC_KEY
    ```
 
-4. Set `PUBLIC_BASE_URL`, `TELNYX_CONNECTION_ID` and `TELNYX_FROM_NUMBER` in `wrangler.jsonc`. The Call Control application needs no webhook URL of its own, because each call sets its own.
+4. Set `TELNYX_CONNECTION_ID` and `TELNYX_FROM_NUMBER` in `wrangler.jsonc`. The Worker is served at `registry.phone2mcp.com` as a custom domain, and `PUBLIC_BASE_URL` already points there. The Call Control application needs no webhook URL of its own, because each call sets its own.
 5. Deploy:
 
    ```bash

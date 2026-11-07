@@ -1,8 +1,8 @@
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { z } from "zod";
-import type { Env } from "./env";
+import { config, type Env } from "./env";
 import { isEd25519PublicKey, publicJwks, randomId, randomToken, sha256Hex, timingSafeEqual } from "./crypto";
-import { lookup, revokeBinding, type BindingRow, type ClaimRow } from "./bindings";
+import { lookup, type ClaimRow } from "./bindings";
 import { parseTelnyxWebhook, verifyTelnyxSignature } from "./telephony";
 import { E164 } from "./protocol";
 
@@ -216,9 +216,23 @@ app.post("/v0/claims/:id/verify", requireAccount, async (c) => {
   const claim = await ownClaim(c);
   if (!claim) return error(c, 404, "not_found");
   if (!["pending", "failed"].includes(claim.status)) return error(c, 409, "claim_not_verifiable", { status: claim.status });
+
+  // Each verification is a paid outbound call: cap them per account.
+  const since = Math.floor(Date.now() / 1000) - 24 * 3600;
+  const placed = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM challenges ch JOIN claims cl ON cl.id = ch.claim_id
+     WHERE cl.account_id = ? AND ch.kind = 'claim' AND ch.created_at > ?`,
+  )
+    .bind(claim.account_id, since)
+    .first<{ n: number }>();
+  if ((placed?.n ?? 0) >= config(c.env).claimCallsPerAccountPerDay) return error(c, 429, "account_call_budget_exceeded");
+
   const stub = c.env.CHALLENGES.get(c.env.CHALLENGES.idFromName(claim.tel));
   const result = await stub.begin({ tel: claim.tel, claimId: claim.id, serverKey: claim.server_key, kind: "claim" });
-  if (!result.ok) return error(c, result.error === "challenge_in_progress" ? 409 : 502, result.error);
+  if (!result.ok) {
+    const status = { challenge_in_progress: 409, number_cooldown: 429, call_failed: 502 }[result.error];
+    return error(c, status, result.error);
+  }
   return c.json(
     { challenge_id: result.challengeId, claim_id: claim.id, status: "calling", expires_at: Math.floor(result.expiresAt / 1000) },
     202,
@@ -228,10 +242,9 @@ app.post("/v0/claims/:id/verify", requireAccount, async (c) => {
 app.delete("/v0/bindings/:tel", requireAccount, async (c) => {
   const t = c.req.param("tel");
   if (!E164.test(t)) return error(c, 400, "invalid_tel");
-  const binding = await c.env.DB.prepare("SELECT account_id FROM bindings WHERE tel = ?").bind(t).first<Pick<BindingRow, "account_id">>();
-  if (!binding || binding.account_id !== c.get("account").id) return error(c, 404, "not_found");
-  await revokeBinding(c.env, t, "registrant_deleted", "revoked");
-  return c.body(null, 204);
+  // The number's ChallengeDO checks ownership and deletes in one serialized step.
+  const stub = c.env.CHALLENGES.get(c.env.CHALLENGES.idFromName(t));
+  return (await stub.deleteBinding(t, c.get("account").id)) ? c.body(null, 204) : error(c, 404, "not_found");
 });
 
 // --- Admin -----------------------------------------------------------------

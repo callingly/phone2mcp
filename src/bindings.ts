@@ -91,6 +91,10 @@ export async function issueBinding(env: Env, s: ChallengeSubject): Promise<Looku
   if (!claim) return null;
   const existing = await env.DB.prepare("SELECT * FROM bindings WHERE tel = ?").bind(s.tel).first<BindingRow>();
   if (s.kind === "reverify" && existing?.claim_id !== s.claimId) return null;
+  // Write only if the binding is still what was read above (none, or the same jti).
+  const guard = existing ? "WHERE bindings.jti = ?" : "WHERE 0";
+  // The rest of the batch applies only if that write landed (D1 batches are transactions).
+  const written = "EXISTS (SELECT 1 FROM bindings WHERE tel = ? AND jti = ?)";
 
   const { recordTtl } = config(env);
   const now = nowSec();
@@ -121,21 +125,28 @@ export async function issueBinding(env: Env, s: ChallengeSubject): Promise<Looku
          record = excluded.record, mcp_url = excluded.mcp_url, server_key = excluded.server_key,
          iat = excluded.iat, exp = excluded.exp, next_reverify_at = excluded.next_reverify_at,
          reverify_failures = 0, mcp_url_changed_at = excluded.mcp_url_changed_at,
-         updated_at = excluded.updated_at`,
+         updated_at = excluded.updated_at
+       ${guard}`,
     ).bind(
       claim.tel, claim.id, claim.account_id, record.jti, jws, claim.mcp_url, claim.server_key,
       record.iat, record.exp, scheduleReverify(record.iat, recordTtl), urlChangedAt, now, now,
+      ...(existing ? [existing.jti] : []),
     ),
-    env.DB.prepare("UPDATE claims SET status = 'verified', failure_reason = NULL, updated_at = ? WHERE id = ?").bind(now, claim.id),
-    env.DB.prepare("UPDATE challenges SET status = 'succeeded', resolved_at = ? WHERE id = ?").bind(now, s.id),
+    env.DB.prepare(`UPDATE claims SET status = 'verified', failure_reason = NULL, updated_at = ? WHERE id = ? AND ${written}`)
+      .bind(now, claim.id, claim.tel, record.jti),
+    env.DB.prepare(`UPDATE challenges SET status = 'succeeded', resolved_at = ? WHERE id = ? AND ${written}`)
+      .bind(now, s.id, claim.tel, record.jti),
   ];
   if (replacing) {
     stmts.push(
-      env.DB.prepare("INSERT OR IGNORE INTO revocations (jti, tel, reason, revoked_at) VALUES (?, ?, 'superseded', ?)").bind(replacing.jti, s.tel, now),
-      env.DB.prepare("UPDATE claims SET status = 'superseded', updated_at = ? WHERE id = ?").bind(now, replacing.claim_id),
+      env.DB.prepare(`INSERT OR IGNORE INTO revocations (jti, tel, reason, revoked_at) SELECT ?, ?, 'superseded', ? WHERE ${written}`)
+        .bind(replacing.jti, s.tel, now, claim.tel, record.jti),
+      env.DB.prepare(`UPDATE claims SET status = 'superseded', updated_at = ? WHERE id = ? AND ${written}`)
+        .bind(now, replacing.claim_id, claim.tel, record.jti),
     );
   }
-  await env.DB.batch(stmts);
+  const [write] = await env.DB.batch(stmts);
+  if (!write.meta.changes) throw new Error(`binding for ${s.tel} changed during issuance`);
 
   const entry: LookupEntry = { tel: claim.tel, record: jws, ...(urlChangedAt ? { mcp_url_changed_at: urlChangedAt } : {}) };
   const { tel: _tel, ...value } = entry;
@@ -149,42 +160,73 @@ export async function issueBinding(env: Env, s: ChallengeSubject): Promise<Looku
  */
 export async function challengeFailed(env: Env, s: ChallengeSubject, reason: string, hard: boolean): Promise<void> {
   const now = nowSec();
-  await env.DB.prepare("UPDATE challenges SET status = 'failed', failure_reason = ?, resolved_at = ? WHERE id = ?")
-    .bind(reason, now, s.id)
-    .run();
+  // Safe to retry: the challenge row is marked last, and a retry after that is a no-op.
+  const row = await env.DB.prepare("SELECT status FROM challenges WHERE id = ?").bind(s.id).first<{ status: string }>();
+  if (row && row.status !== "pending") return;
+  const markChallenge = env.DB.prepare("UPDATE challenges SET status = 'failed', failure_reason = ?, resolved_at = ? WHERE id = ?")
+    .bind(reason, now, s.id);
 
   if (s.kind === "claim") {
-    await env.DB.prepare("UPDATE claims SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ? AND status = 'verifying'")
-      .bind(reason, now, s.claimId)
-      .run();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE claims SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ? AND status = 'verifying'")
+        .bind(reason, now, s.claimId),
+      markChallenge,
+    ]);
     return;
   }
 
   const binding = await env.DB.prepare("SELECT * FROM bindings WHERE tel = ? AND claim_id = ?")
     .bind(s.tel, s.claimId)
     .first<BindingRow>();
-  if (!binding) return;
-  const { reverifyMaxFailures, reverifyRetry } = config(env);
-  const failures = binding.reverify_failures + 1;
-  const nextAttempt = now + reverifyRetry;
-  if (hard || failures >= reverifyMaxFailures || nextAttempt >= binding.exp) {
-    await revokeBinding(env, s.tel, `reverify_failed:${reason}`);
-  } else {
-    await env.DB.prepare("UPDATE bindings SET reverify_failures = ?, next_reverify_at = ?, updated_at = ? WHERE tel = ?")
-      .bind(failures, nextAttempt, now, s.tel)
-      .run();
+  if (binding) {
+    const { reverifyMaxFailures, reverifyRetry } = config(env);
+    const failures = binding.reverify_failures + 1;
+    const nextAttempt = now + reverifyRetry;
+    if (hard || failures >= reverifyMaxFailures || nextAttempt >= binding.exp) {
+      await revokeBinding(env, s.tel, `reverify_failed:${reason}`, { jti: binding.jti });
+    } else {
+      await env.DB.prepare("UPDATE bindings SET reverify_failures = ?, next_reverify_at = ?, updated_at = ? WHERE tel = ? AND jti = ?")
+        .bind(failures, nextAttempt, now, s.tel, binding.jti)
+        .run();
+    }
   }
+  await markChallenge.run();
 }
 
-/** Remove a binding and revoke its current record. */
-export async function revokeBinding(env: Env, tel: string, reason: string, claimStatus = "revoked"): Promise<boolean> {
+/**
+ * Remove a binding and revoke its current record. With `accountId` or `jti`,
+ * only a binding that still matches is touched. Callers run inside the
+ * number's ChallengeDO, which serializes all writes to its binding and KV key.
+ */
+export async function revokeBinding(
+  env: Env,
+  tel: string,
+  reason: string,
+  match: { accountId?: string; jti?: string } = {},
+): Promise<boolean> {
   const binding = await env.DB.prepare("SELECT * FROM bindings WHERE tel = ?").bind(tel).first<BindingRow>();
   if (!binding) return false;
+  if (match.accountId !== undefined && binding.account_id !== match.accountId) return false;
+  if (match.jti !== undefined && binding.jti !== match.jti) return false;
   const now = nowSec();
   await env.DB.batch([
     env.DB.prepare("INSERT OR IGNORE INTO revocations (jti, tel, reason, revoked_at) VALUES (?, ?, ?, ?)").bind(binding.jti, tel, reason, now),
     env.DB.prepare("DELETE FROM bindings WHERE tel = ? AND jti = ?").bind(tel, binding.jti),
-    env.DB.prepare("UPDATE claims SET status = ?, failure_reason = ?, updated_at = ? WHERE id = ?").bind(claimStatus, reason, now, binding.claim_id),
+    env.DB.prepare("UPDATE claims SET status = 'revoked', failure_reason = ?, updated_at = ? WHERE id = ?").bind(reason, now, binding.claim_id),
+  ]);
+  await env.RECORDS.delete(kvKey(tel));
+  return true;
+}
+
+/** Drop a binding past its `exp`. Runs inside the number's ChallengeDO. */
+export async function expireBinding(env: Env, tel: string, nowSec: number): Promise<boolean> {
+  const binding = await env.DB.prepare("SELECT claim_id, jti FROM bindings WHERE tel = ? AND exp <= ?")
+    .bind(tel, nowSec)
+    .first<Pick<BindingRow, "claim_id" | "jti">>();
+  if (!binding) return false;
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM bindings WHERE tel = ? AND jti = ?").bind(tel, binding.jti),
+    env.DB.prepare("UPDATE claims SET status = 'expired', updated_at = ? WHERE id = ?").bind(nowSec, binding.claim_id),
   ]);
   await env.RECORDS.delete(kvKey(tel));
   return true;
